@@ -163,9 +163,10 @@ def train(total_steps=10000, ckpt_path=None, save_path="deepseek_checkpoint.pt",
     # Force extreme memory settings for original config
     micro_batch_size = 2
     sequence_length = 512 
-    gradient_accumulation_steps = max(gradient_accumulation_steps, 16)  # More accumulation
+    gradient_accumulation_steps = max(gradient_accumulation_steps, 8)  # More accumulation
 
     model = DeepSeek(config).to(device)
+    model = torch.compile(model, mode="default", fullgraph=False)
     # Print model info
     n_params = model.count_parameters()
     kv_lora_rank = config.n_embd // config.compression_ratio
@@ -281,6 +282,8 @@ def train(total_steps=10000, ckpt_path=None, save_path="deepseek_checkpoint.pt",
         
         for micro_step in range(gradient_accumulation_steps):
             x, y = loader.next_batch()
+            x = x.pin_memory()
+            y = y.pin_memory()
             # x, y = x.to(device), y.to(device)
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
@@ -296,17 +299,17 @@ def train(total_steps=10000, ckpt_path=None, save_path="deepseek_checkpoint.pt",
             
             # Clear memory after each micro-batch for original config
 
-            if step % 1000 == 0 and step > 0:
-                del logits
-                if device == "cuda":
-                    torch.cuda.empty_cache()
+            # if step % 1000 == 0 and step > 0:
+            #     del logits
+            #     if device == "cuda":
+            #         torch.cuda.empty_cache()
 
         # Clip gradients and step
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
 
-        if device == "cuda":
-            torch.cuda.synchronize()
+        # if device == "cuda":
+        #     torch.cuda.synchronize()
 
         t1 = time.time()
         # Calculate tokens per second for entire accumulated batch
@@ -327,10 +330,10 @@ def train(total_steps=10000, ckpt_path=None, save_path="deepseek_checkpoint.pt",
                 print(f"step {step:5d} | loss {loss_accum:.4f} | lr {lr:.6f} | tok/s {tok_per_sec:8.1f} | MFU {mfu*100:.2f}%")
         
         # Save checkpoint and show expert statistics every 1000 steps
-        if step % 1000 == 0 and step > 0:
+        if step % 500 == 0 and step > 0:
             # Clear cache before checkpoint
-            if device == "cuda":
-                torch.cuda.empty_cache()
+            # if device == "cuda":
+            #     torch.cuda.empty_cache()
             
             # Display expert usage statistics
             print(f"\n{'='*70}")

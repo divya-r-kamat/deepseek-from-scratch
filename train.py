@@ -139,7 +139,7 @@ def train(total_steps=10000, ckpt_path=None, save_path="deepseek_checkpoint.pt",
     if device == "cuda":
         torch.cuda.empty_cache()
         # Set memory allocation config for better fragmentation handling
-        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+        os.environ['PYTORCH_ALLOC_CONF'] = 'expandable_segments:True'
     
     # Auto-detect vocab size from tokenizer if not specified
     if vocab_size is None:

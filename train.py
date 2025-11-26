@@ -4,7 +4,7 @@ import argparse
 import math
 import torch
 from transformers import AutoTokenizer
-from deepseek_model import DeepSeek, DeepSeekConfig
+from model import DeepSeek, DeepSeekConfig
 
 
 # -----------------------------------------------------------------------------
@@ -172,7 +172,7 @@ def train(total_steps=10000, ckpt_path=None, save_path="deepseek_checkpoint.pt",
     kv_lora_rank = config.n_embd // config.compression_ratio
     
     print(f"\n{'='*70}")
-    print(f"DeepSeek Model Configuration {'(ORIGINAL)' if use_original_config else '(OPTIMIZED)'}")
+    print(f"DeepSeek Model Configuration")
     print(f"{'='*70}")
     print(f"Model parameters: {n_params:,} ({n_params/1e6:.2f}M)")
     print(f"Vocabulary size: {config.vocab_size:,}")

@@ -123,14 +123,17 @@ def load_checkpoint(filepath, device, model, optimizer=None):
 # -----------------------------------------------------------------------------
 def train(total_steps=10000, ckpt_path=None, save_path="deepseek_checkpoint.pt", 
           use_lr_schedule=True, log_interval=100, vocab_size=None, 
-          micro_batch_size=1, gradient_accumulation_steps=4,
-          use_original_config=False):
+          micro_batch_size=1, gradient_accumulation_steps=4):
     # Device
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
 
     # Enable memory optimizations
     torch.set_float32_matmul_precision("high")
+
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    AMP_DTYPE = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     
     # Enable gradient checkpointing and other memory optimizations
     if device == "cuda":
@@ -144,47 +147,25 @@ def train(total_steps=10000, ckpt_path=None, save_path="deepseek_checkpoint.pt",
         vocab_size = len(tokenizer)
         print(f"Auto-detected vocabulary size: {vocab_size}")
 
-    # Choose config based on flag
-    if use_original_config:
-        print("\n⚠️  WARNING: Using ORIGINAL config - requires significant memory optimizations!")
-        print("   This will use: micro_batch=1, seq_len=64, gradient checkpointing, 8-bit optimizer\n")
-        
-        config = DeepSeekConfig(
-            vocab_size=vocab_size,
-            n_layer=30,              # ORIGINAL
-            n_head=9,                # ORIGINAL
-            n_embd=576,              # ORIGINAL
-            head_dim=64,
-            intermediate_size=1536,  # ORIGINAL
-            max_seq_length=512,
-            compression_ratio=8,
-            n_routed_experts=8,      # ORIGINAL
-            n_shared_experts=1,
-            top_k_experts=2,
-        )
-        # Force extreme memory settings for original config
-        micro_batch_size = 1
-        sequence_length = 64  # Very short sequences
-        gradient_accumulation_steps = max(gradient_accumulation_steps, 16)  # More accumulation
-    else:
-        print("\n✓ Using MEMORY-OPTIMIZED config for 15GB GPU")
-        config = DeepSeekConfig(
-            vocab_size=vocab_size,
-            n_layer=12,              # Reduced
-            n_head=6,                # Reduced
-            n_embd=384,              # Reduced
-            head_dim=64,
-            intermediate_size=1024,  # Reduced
-            max_seq_length=512,
-            compression_ratio=8,
-            n_routed_experts=4,      # Reduced
-            n_shared_experts=1,
-            top_k_experts=2,
-        )
-        sequence_length = 128
+    config = DeepSeekConfig(
+        vocab_size=vocab_size,
+        n_layer=30,              # ORIGINAL
+        n_head=9,                # ORIGINAL
+        n_embd=576,              # ORIGINAL
+        head_dim=64,
+        intermediate_size=1536,  # ORIGINAL
+        max_seq_length=512,
+        compression_ratio=8,
+        n_routed_experts=8,      # ORIGINAL
+        n_shared_experts=1,
+        top_k_experts=2,
+    )
+    # Force extreme memory settings for original config
+    micro_batch_size = 2
+    sequence_length = 512 
+    gradient_accumulation_steps = max(gradient_accumulation_steps, 16)  # More accumulation
 
     model = DeepSeek(config).to(device)
-
     # Print model info
     n_params = model.count_parameters()
     kv_lora_rank = config.n_embd // config.compression_ratio
@@ -224,7 +205,7 @@ def train(total_steps=10000, ckpt_path=None, save_path="deepseek_checkpoint.pt",
     # LR schedule params
     max_lr = 3e-4
     min_lr = max_lr * 0.1
-    warmup_steps = 100
+    warmup_steps = max(10, int(0.03 * total_steps))
     
     # Try to use 8-bit Adam optimizer to save memory (~50% optimizer memory)
     optimizer_name = "AdamW"
@@ -239,11 +220,10 @@ def train(total_steps=10000, ckpt_path=None, save_path="deepseek_checkpoint.pt",
         optimizer_name = "AdamW8bit"
         print(f"✓ Using 8-bit {optimizer_name} optimizer (saves ~50% memory)")
     except ImportError:
-        if use_original_config:
-            print("\n⚠️  WARNING: bitsandbytes not available!")
-            print("   Original config STRONGLY recommends 8-bit optimizer")
-            print("   Install with: !pip install bitsandbytes")
-            print("   Continuing with standard AdamW (may run out of memory)...\n")
+        print("\n⚠️  WARNING: bitsandbytes not available!")
+        print("   Original config STRONGLY recommends 8-bit optimizer")
+        print("   Install with: !pip install bitsandbytes")
+        print("   Continuing with standard AdamW (may run out of memory)...\n")
         optimizer = torch.optim.AdamW(
             model.parameters(),
             lr=max_lr,
@@ -301,9 +281,12 @@ def train(total_steps=10000, ckpt_path=None, save_path="deepseek_checkpoint.pt",
         
         for micro_step in range(gradient_accumulation_steps):
             x, y = loader.next_batch()
-            x, y = x.to(device), y.to(device)
+            # x, y = x.to(device), y.to(device)
+            x = x.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True)
 
-            with torch.autocast(device_type=device, dtype=torch.bfloat16):
+            # with torch.autocast(device_type=device, dtype=torch.bfloat16):
+            with torch.autocast(device_type=device, dtype=AMP_DTYPE):
                 logits, loss = model(x, y)
                 # Scale loss by accumulation steps
                 loss = loss / gradient_accumulation_steps
@@ -312,7 +295,8 @@ def train(total_steps=10000, ckpt_path=None, save_path="deepseek_checkpoint.pt",
             loss.backward()
             
             # Clear memory after each micro-batch for original config
-            if use_original_config:
+
+            if step % 1000 == 0 and step > 0:
                 del logits
                 if device == "cuda":
                     torch.cuda.empty_cache()
@@ -395,8 +379,6 @@ if __name__ == "__main__":
                         help="Micro batch size per forward pass")
     parser.add_argument("--grad-accum-steps", type=int, default=4,
                         help="Gradient accumulation steps (effective_batch = micro_batch * grad_accum)")
-    parser.add_argument("--original-config", action="store_true",
-                        help="Use ORIGINAL config (30L, 576d, 8 experts) - requires 8-bit optimizer!")
 
     args = parser.parse_args()
 
@@ -408,7 +390,6 @@ if __name__ == "__main__":
         log_interval=args.log_interval,
         vocab_size=args.vocab_size,
         micro_batch_size=args.micro_batch_size,
-        gradient_accumulation_steps=args.grad_accum_steps,
-        use_original_config=args.original_config
+        gradient_accumulation_steps=args.grad_accum_steps
     )
 

@@ -161,9 +161,9 @@ def train(total_steps=10000, ckpt_path=None, save_path="deepseek_checkpoint.pt",
         top_k_experts=2,
     )
     # Force extreme memory settings for original config
-    micro_batch_size = 2
+    micro_batch_size = 4
     sequence_length = 512 
-    gradient_accumulation_steps = max(gradient_accumulation_steps, 8)  # More accumulation
+    gradient_accumulation_steps = max(gradient_accumulation_steps, 32)  # More accumulation
 
     model = DeepSeek(config).to(device)
     model = torch.compile(model, mode="default", fullgraph=False)

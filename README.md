@@ -91,6 +91,60 @@ The Shakespeare Dataset : We train on Shakespeare’s complete works (input.txt 
         (norm): RMSNorm()
       )
     )
+
+The model follows the main ideas in DeepSeek-V2/V3 mid-sized configurations:
+
+- Multi-Head Latent Attention (MHLA) for compressed-KV attention
+- Mixture of Experts (MoE) MLP blocks (8 routed + 1 shared expert per layer)
+- RMSNorm, RoPE, and 30 transformer blocks
+- 576-dim hidden size, 9 heads, 64-dim head hidden, 1536 MLP hidden
+
+Total parameters: ~767M.
+
+### Multi-Head Latent Attention (MHLA / MLA)?
+
+MLA is a major innovation introduced in DeepSeek-V2. It is designed to dramatically reduce KV-cache size and memory bandwidth, without losing much attention quality.
+
+Traditional multi-head attention stores full K and V matrices for each head, leading to massive KV memory footprint per layer.
+
+    Shape = (layer, head, sequence_length, head_dim)
+
+
+MLA compresses the keys and values into a smaller latent space, similar to a low-rank projection.
+
+### Mixture of Experts (MoE)
+
+In DeepSeek-V2/V3, MoE is used in every MLP layer. Instead of using a single dense MLP, multiple experts are used: 8 routed experts + 1 shared expert
+
+Each expert is a full MLP:
+
+    gate_proj → activation → up_proj → activation → down_proj
+
+### Routing
+
+A small routing network:
+
+    gate(x) → logits → softmax → top-K selection
+
+Gating determines the contribution of each expert. Each token may route to different experts, enabling specialization
+
+### Shared Expert
+DeepSeek introduced one shared expert in addition to routed experts.
+- Prevents catastrophic under-utilization
+- Provides a fallback path for rare tokens
+- Stabilizes training
+- Improves performance in low-data regimes (important for your Shakespeare setup)
+
+### Load-Balancing (DeepSeek V3 Bias-Based Loss-less LB)
+
+Common problem: some experts get overused.
+
+DeepSeek uses a bias-based, lossless load-balancing scheme:
+- Adjusts gating logits with trainable biases
+- Encourages uniform expert usage
+- Does not add extra loss that may harm training
+
+
 ## Model Configurations
 
     ======================================================================
@@ -426,48 +480,57 @@ The Shakespeare Dataset : We train on Shakespeare’s complete works (input.txt 
 
 Since the size of the model is very big quantized the model to 8bit.
 
+full weights = ~767M parameters, Deploying such a model on consumer GPUs (or CPU) becomes difficult.
 
-    import torch
-    
-    src = '/content/deepseek-from-scratch/deepseek_checkpoint.pt'
-    dst = '/content/deepseek-from-scratch/deepseek_checkpoint_int8.pt'
-    
-    ckpt = torch.load(src, map_location='cpu', weights_only=False)
-    sd = ckpt['model_state']
-    
-    quant_state = {}
-    meta = {}  # store scales and dtypes for dequant
-    
-    for k, v in sd.items():
-        if not isinstance(v, torch.Tensor):
-            # Keep non-tensor entries as-is
-            quant_state[k] = v
-            meta[k] = {'type': 'non_tensor'}
-            continue
-    
-        if v.is_floating_point():
-            # Symmetric per-tensor int8 quantization
-            vmax = v.abs().max()
-            # Avoid division by zero
-            scale = (vmax / 127.0).item() if vmax > 0 else 1e-8
-    
-            q = torch.clamp((v / scale).round(), -127, 127).to(torch.int8)
-            quant_state[k] = q
-            meta[k] = {'type': 'int8', 'scale': scale, 'orig_dtype': str(v.dtype)}
-        else:
-            # Non-float tensors (e.g., embeddings indices, buffers) kept as-is
-            quant_state[k] = v
-            meta[k] = {'type': 'raw', 'orig_dtype': str(v.dtype)}
-    
-    torch.save({
-        'quant_state': quant_state,
-        'meta': meta,
-        'config': ckpt.get('config', None),
-        'loss': ckpt.get('loss', None),
-        'step': ckpt.get('step', None),
-    }, dst)
-    
-    print(f"Saved INT8 checkpoint to: {dst}")
+- fp16 → ~1.5 GB
+- fp32 → ~3.0 GB
+
+Quantization reduces size by 4×:
+- fp32 → int8
+- 3 GB → ~750 MB
+
+
+        import torch
+        
+        src = '/content/deepseek-from-scratch/deepseek_checkpoint.pt'
+        dst = '/content/deepseek-from-scratch/deepseek_checkpoint_int8.pt'
+        
+        ckpt = torch.load(src, map_location='cpu', weights_only=False)
+        sd = ckpt['model_state']
+        
+        quant_state = {}
+        meta = {}  # store scales and dtypes for dequant
+        
+        for k, v in sd.items():
+            if not isinstance(v, torch.Tensor):
+                # Keep non-tensor entries as-is
+                quant_state[k] = v
+                meta[k] = {'type': 'non_tensor'}
+                continue
+        
+            if v.is_floating_point():
+                # Symmetric per-tensor int8 quantization
+                vmax = v.abs().max()
+                # Avoid division by zero
+                scale = (vmax / 127.0).item() if vmax > 0 else 1e-8
+        
+                q = torch.clamp((v / scale).round(), -127, 127).to(torch.int8)
+                quant_state[k] = q
+                meta[k] = {'type': 'int8', 'scale': scale, 'orig_dtype': str(v.dtype)}
+            else:
+                # Non-float tensors (e.g., embeddings indices, buffers) kept as-is
+                quant_state[k] = v
+                meta[k] = {'type': 'raw', 'orig_dtype': str(v.dtype)}
+        
+        torch.save({
+            'quant_state': quant_state,
+            'meta': meta,
+            'config': ckpt.get('config', None),
+            'loss': ckpt.get('loss', None),
+            'step': ckpt.get('step', None),
+        }, dst)
+        
+        print(f"Saved INT8 checkpoint to: {dst}")
 
 
 ## Output Sample

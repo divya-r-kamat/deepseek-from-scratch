@@ -4,7 +4,7 @@ import argparse
 import math
 import torch
 from transformers import AutoTokenizer
-from deepseek_model import DeepSeek, DeepSeekConfig
+from model import DeepSeek, DeepSeekConfig
 
 
 # -----------------------------------------------------------------------------

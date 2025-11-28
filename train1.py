@@ -153,6 +153,10 @@ def train(total_steps=10000, ckpt_path=None, save_path="deepseek_checkpoint.pt",
     )
 
     model = DeepSeek(config).to(device)
+    # CRITICAL: Compile model for better performance
+    # if use_compile and hasattr(torch, 'compile'):
+    print("Compiling model with torch.compile()...")
+    model = torch.compile(model)
     
     # Print model info
     n_params = model.count_parameters()
